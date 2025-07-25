@@ -1,5 +1,7 @@
 import random
 
+import torch
+
 import pytorch_lightning as pl
 import typer
 from pytorch_lightning import LightningDataModule
@@ -83,7 +85,7 @@ def train_model(
             mode="min",
         )
         trainer = pl.Trainer(
-            accelerator=accelerator,
+            accelerator= accelerator,
             precision="bf16-mixed",
             max_epochs=40,
             enable_checkpointing=True,

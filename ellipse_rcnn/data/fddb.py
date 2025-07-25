@@ -79,7 +79,7 @@ class FDDB(EllipseDatasetBase):
     def __init__(
         self,
         root: str | Path = Path("./data/FDDB"),
-        train: bool = True,
+        train: bool = False,
         download: bool = False,
         verbose: bool = True,
         ellipse_dict: dict[str, list[EllipseTuple]] | None = None,
@@ -118,6 +118,7 @@ class FDDB(EllipseDatasetBase):
             self.download()
 
         if not self._check_exists():
+            print(f"FDDB Dataset does not exist in {self.root}.")
             raise RuntimeError("Dataset not found. Use download=True to download it")
 
         self.transform = torchvision.transforms.Compose(
