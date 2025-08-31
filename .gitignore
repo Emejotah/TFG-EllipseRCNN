@@ -154,3 +154,47 @@ poetry.lock
 *.ckpt
 *.pt
 *.pth
+
+# Test and evaluation output files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.svg
+*.json
+*.csv
+*.txt
+*.log
+*.md
+*.html
+*.xml
+
+# Exclude specific important files from the above wildcard rules
+!README.md
+!requirements.txt
+!pyproject.toml
+!LICENSE
+!*.py
+
+# Evaluation and test results
+*_results/
+*_output/
+*_analysis/
+test_*/
+debug_*/
+evaluation_*/
+analysis_*/
+diagnostic_*/
+comparison_*/
+
+# Temporary files
+temp/
+tmp/
+.temp/
+.tmp/
+
+
+*.ipynb
+*.m
