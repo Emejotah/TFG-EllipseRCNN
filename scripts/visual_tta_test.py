@@ -639,3 +639,7 @@ def test_custom_image(image_path, min_score=0.5):
     )
 
 # %%
+if __name__ == '__main__':
+    test_custom_image("../docs/friends.jpg")
+
+# %%

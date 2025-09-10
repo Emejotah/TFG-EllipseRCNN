@@ -3,19 +3,17 @@
 <a href="https://pytorch.org/get-started/locally/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white"></a>
 <a href="https://pytorchlightning.ai/"><img alt="Lightning" src="https://img.shields.io/badge/-Lightning-792ee5"></a>
 
-# Ellipse R-CNN
+# Ellipse R-CNN + TTA Implementation
 
 </div>
 
-A PyTorch (Lightning) implementation of Ellipse R-CNN. Extracted from [another project](https://github.com/wdoppenberg/crater-detection).
-The methodology is based on [Ellipse R-CNN: Learning to Infer Elliptical Object from Clustering and Occlusion](https://arxiv.org/abs/2001.11584), albeit
-with slight changes. Primarily this implementation was made to enable Crater detection from Moon orbiter sensors, but
-works with the [Face Detection Dataset & Benchmark](https://www.kaggle.com/datasets/cormacwc/fddb-dataset) (FDDB) dataset as well.
+A PyTorch (Lightning) implementation of Ellipse R-CNN with advanced Test-Time Augmentation (TTA) capabilities. This project extends the original methodology from [Ellipse R-CNN: Learning to Infer Elliptical Object from Clustering and Occlusion](https://arxiv.org/abs/2001.11584) with comprehensive TTA implementation, quality-aware consensus algorithms, and extensive evaluation frameworks. 
+
+The implementation is specifically optimized for ellipse detection tasks and includes sophisticated error analysis tools, making it particularly effective for face detection using the [Face Detection Dataset & Benchmark](https://www.kaggle.com/datasets/cormacwc/fddb-dataset) (FDDB) dataset.
 
 <div align="center">
 
 ![Sample FDDB predictions](docs/fddb_sample.png)
-![Sample crater predictions](docs/craters_sample.png)
 
 </div>
 
@@ -51,7 +49,7 @@ from ellipse_rcnn.utils.viz import plot_single_pred
 model = EllipseRCNN.from_pretrained("MJGT/ellipse-rcnn-FDDB")  # For the FDDB face detection model
 model.eval()
 
-png = Image.open("docs/example_craters.png").convert("L")
+png = Image.open("docs/friends.png").convert("L")
 img = to_tensor(png)
 with torch.no_grad():
     pred = model([img])
@@ -63,8 +61,7 @@ This should output the following:
 
 <div align="center">
 
-# TODO: cambiar imagen
-<img alt="Crater Prediction" height="300" src="docs/crater_pred.png" width="300"/>
+<img alt="Friends Prediction" height="300" src="docs/friends_sample.png" width="300"/>
 
 </div>
 
