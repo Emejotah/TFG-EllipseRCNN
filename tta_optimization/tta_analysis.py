@@ -109,13 +109,13 @@ class TTAAnalyzer:
         print(f"🚀 STARTING COMPREHENSIVE TTA ANALYSIS")
         print(f"="*60)
         
-        # Step 1: Partition dataset
-        print(f"\n📊 Step 1: Dataset Partitioning")
-        selected_images = self._partition_dataset(optimization_fraction, max_images)
+        # Step 1: Calculate target dataset size
+        print(f"\n📊 Step 1: Calculating Target Dataset Size")
+        target_count = self._calculate_target_count(optimization_fraction, max_images)
         
         # Step 2: Load dataset subset
         print(f"\n📂 Step 2: Loading Dataset Subset")
-        dataset = self._load_dataset_subset(selected_images)
+        dataset = self._load_dataset_subset(target_count)
         
         # Update metadata with actual parameters
         self.results['metadata']['max_images_limit'] = max_images
@@ -158,81 +158,54 @@ class TTAAnalyzer:
         
         return self.results
     
-    def _partition_dataset(self, optimization_fraction: float, max_images: int = None) -> List[str]:
-        """Create dataset partition and return selected image paths."""
-        partitioner = FDDBSimplePartitioner(str(self.data_root), seed=42)
-        splits = partitioner.create_tta_optimization_splits(optimization_fraction)
-        partitioner.save_splits(splits, optimization_fraction)
-        
-        selected_images = splits['optimization']
-        
-        # Apply max_images limit if specified
-        if max_images is not None and max_images > 0:
-            if len(selected_images) > max_images:
-                print(f"🔄 Limiting dataset from {len(selected_images)} to {max_images} images for testing")
-                selected_images = selected_images[:max_images]
-        
-        print(f"📊 Selected {len(selected_images)} images for analysis")
-        
-        return selected_images
+    def _calculate_target_count(self, optimization_fraction: float, max_images: int = None) -> int:
+        """Calculate the target number of images for analysis."""
+        # Load full dataset to get total count
+        try:
+            full_dataset = FDDB(str(self.data_root), download=False)
+            total_images = len(full_dataset.ellipse_dict)
+            
+            # Calculate target based on fraction
+            target_from_fraction = int(total_images * optimization_fraction)
+            
+            # Apply max_images limit if specified
+            if max_images is not None and max_images > 0:
+                target_count = min(target_from_fraction, max_images)
+                print(f"🔄 Target count limited from {target_from_fraction} to {target_count} by max_images")
+            else:
+                target_count = target_from_fraction
+            
+            print(f"📊 Dataset statistics:")
+            print(f"   Total images in FDDB: {total_images}")
+            print(f"   Optimization fraction: {optimization_fraction:.1%}")
+            print(f"   Target images for analysis: {target_count}")
+            
+            return target_count
+            
+        except Exception as e:
+            print(f"⚠️ Error calculating target count: {e}")
+            # Return a safe default
+            return max_images if max_images and max_images > 0 else 100
     
-    def _load_dataset_subset(self, selected_images: List[str]) -> FDDB:
-        """Load FDDB dataset subset based on selected images."""
+    def _load_dataset_subset(self, target_count: int) -> FDDB:
+        """Load FDDB dataset subset with a fixed number of images."""
         # Create full dataset
         full_dataset = FDDB(str(self.data_root), download=False)
         
-        # Debug: Print first few keys from both sources
-        print(f"🔍 Debug: First few selected images: {selected_images[:3]}")
-        print(f"🔍 Debug: First few FDDB keys: {list(full_dataset.ellipse_dict.keys())[:3]}")
+        # Get all available keys
+        all_keys = list(full_dataset.ellipse_dict.keys())
+        print(f"🔍 Total images available in FDDB: {len(all_keys)}")
         
-        # Create ellipse_dict for selected images only
-        selected_ellipse_dict = {}
-        for img_path in selected_images:
-            # Extract relative path from full path for FDDB key lookup
-            img_path_obj = Path(img_path)
-            
-            # Try different path extraction methods
-            try:
-                # Method 1: Try direct relative path extraction
-                relative_key = str(img_path_obj.relative_to(img_path_obj.parents[1]))
-                relative_key = relative_key.replace('.jpg', '').replace('\\', '/')
-                
-                if relative_key in full_dataset.ellipse_dict:
-                    selected_ellipse_dict[relative_key] = full_dataset.ellipse_dict[relative_key]
-                    print(f"✅ Matched: {relative_key}")
-                    continue
-                
-                # Method 2: Try just the filename without extension
-                filename_key = img_path_obj.stem
-                if filename_key in full_dataset.ellipse_dict:
-                    selected_ellipse_dict[filename_key] = full_dataset.ellipse_dict[filename_key]
-                    print(f"✅ Matched by filename: {filename_key}")
-                    continue
-                
-                # Method 3: Try matching by searching in existing keys
-                for fddb_key in full_dataset.ellipse_dict.keys():
-                    if img_path_obj.stem in fddb_key or fddb_key in str(img_path_obj):
-                        selected_ellipse_dict[fddb_key] = full_dataset.ellipse_dict[fddb_key]
-                        print(f"✅ Matched by search: {fddb_key} for {img_path}")
-                        break
-                else:
-                    print(f"❌ No match found for: {img_path}")
-                
-            except Exception as e:
-                print(f"⚠️ Error processing path {img_path}: {e}")
-                continue
+        # Take the first N images to ensure we always get the requested count
+        if target_count > len(all_keys):
+            print(f"⚠️ Requested {target_count} images but only {len(all_keys)} available")
+            target_count = len(all_keys)
         
-        print(f"📂 Loaded subset with {len(selected_ellipse_dict)} images")
+        selected_keys = all_keys[:target_count]
+        print(f"📂 Selected {len(selected_keys)} images for analysis")
         
-        # If no images matched, raise an error instead of returning empty dataset
-        if len(selected_ellipse_dict) == 0:
-            print("❌ No images matched between partitioner and FDDB dataset!")
-            print("🔍 This suggests a path mismatch issue.")
-            # Return a minimal dataset instead of empty to avoid crashes
-            # Take first N images from full dataset as fallback
-            fallback_keys = list(full_dataset.ellipse_dict.keys())[:len(selected_images)]
-            selected_ellipse_dict = {k: full_dataset.ellipse_dict[k] for k in fallback_keys}
-            print(f"🔄 Using fallback: first {len(selected_ellipse_dict)} images from dataset")
+        # Create ellipse_dict for selected images
+        selected_ellipse_dict = {k: full_dataset.ellipse_dict[k] for k in selected_keys}
         
         # Create subset dataset
         subset_dataset = FDDB(str(self.data_root), ellipse_dict=selected_ellipse_dict)
@@ -344,7 +317,7 @@ class TTAAnalyzer:
                         image_tensor=image_tensor,
                         device=self.device,
                         min_score=min_score,
-                        consensuate=False,  # MODIFIED: Disable consensuation for individual testing
+                        consensuate=True,  # MODIFIED: Enable consensuation with validation
                         visualize=False
                     )
                 except Exception as tta_error:
@@ -358,7 +331,7 @@ class TTAAnalyzer:
                     }]
                     transform_details = []
                 
-                # MODIFIED: Since consensuation is disabled, use first prediction (original) for comparison
+                # Use consensuated prediction for comparison (with validation)
                 pred_dict = tta_preds[0] if tta_preds else {
                     'ellipse_params': torch.empty((0, 5), device=self.device),
                     'scores': torch.empty((0,), device=self.device),
@@ -580,9 +553,9 @@ class TTAAnalyzer:
                 center_error = torch.norm(pred_center - closest_target[2:4]).item()
                 errors['center_errors'].append(center_error)
                 
-                # Calculate angle error (degrees)
+                # Calculate angle error (degrees) - corrected for [-π/2, π/2] range
                 angle_diff = abs(pred_ellipse[4].item() - closest_target[4].item())
-                angle_error = min(angle_diff, 2*math.pi - angle_diff) * 180 / math.pi
+                angle_error = min(angle_diff, math.pi - angle_diff) * 180 / math.pi
                 errors['angle_errors'].append(angle_error)
                 
                 # Calculate area error (relative)
@@ -759,7 +732,7 @@ def main():
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # Auto-detect CUDA
     OPTIMIZATION_FRACTION = 0.1  # 10% of dataset
     MIN_SCORE = 0.5  # Minimum confidence threshold
-    MAX_IMAGES = 5  # Limit for testing - set to None for no limit
+    MAX_IMAGES = 10  # Limit for testing - set to None for no limit
     
     print(f"🤗 Model: {MODEL_REPO}")
     print(f"📁 Data: {DATA_ROOT}")

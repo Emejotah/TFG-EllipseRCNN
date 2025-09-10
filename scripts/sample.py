@@ -9,7 +9,7 @@ from ellipse_rcnn.data.craters import CraterEllipseDataset
 from ellipse_rcnn.data.fddb import FDDB
 from ellipse_rcnn.hf import EllipseRCNN
 from ellipse_rcnn.utils.viz import plot_ellipses, plot_bboxes
-from ellipse_rcnn.tta.tta_transforms import tta_predict
+from tta.tta_transforms import tta_predict
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
 
@@ -21,7 +21,7 @@ def predict(
     ),
     data_path: str = typer.Argument(..., help="Path to the dataset directory."),
     min_score: float = typer.Option(
-        0.8, help="Minimum score threshold for predictions."
+        0.5, help="Minimum score threshold for predictions."
     ),
     dataset: str = "FDDB",
     plot_centers: bool = typer.Option(False, help="Whether to plot ellipse centers."),
@@ -40,7 +40,7 @@ def predict(
     typer.echo(f"Loading model from {model_path_or_repo}...")
     model = EllipseRCNN.from_pretrained(model_path_or_repo)
     model.eval().cpu()
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     typer.echo(f"Using {'Test Time Augmentation (TTA)' if use_tta else 'standard prediction'}")
     typer.echo(f"Minimum score threshold: {min_score}")
@@ -109,3 +109,5 @@ def predict(
 
 if __name__ == "__main__":
     app()
+
+## uv run .\sample.py MJGT/ellipse-rcnn-FDDB C:\Users\mjgto\Desktop\Universidad\5Quinto\TFG_Infor\Proyecto\ellipse-rcnn\data\FDDB

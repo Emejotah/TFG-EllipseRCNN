@@ -1,6 +1,6 @@
 """
 Data loader and module for the FDDB dataset.
-https://vis-www.cs.umass.edu/fddb/
+https://www.kaggle.com/datasets/cormacwc/fddb-dataset
 """
 
 import os
@@ -67,11 +67,11 @@ def preprocess_label_files(root_path: Path) -> dict[str, list[EllipseTuple]]:
 class FDDB(EllipseDatasetBase):
     resources = {
         "labels": (
-            "http://vis-www.cs.umass.edu/fddb/FDDB-folds.tgz",
+            "https://www.kaggle.com/datasets/cormacwc/fddb-dataset/download?datasetVersionNumber=1",
             None,
         ),
         "images": (
-            "http://vis-www.cs.umass.edu/fddb/originalPics.tar.gz",
+            "https://www.kaggle.com/datasets/cormacwc/fddb-dataset/download?datasetVersionNumber=1",
             None,
         ),
     }

@@ -48,7 +48,7 @@ import torchvision.transforms as T
 import os
 from ellipse_rcnn.pl import EllipseRCNNModule
 from safetensors.torch import load_file
-from ellipse_rcnn.tta.tta_transforms import tta_predict
+from tta.tta_transforms import tta_predict
 
 # Load the trained model
 model = EllipseRCNNModule()
@@ -58,7 +58,7 @@ device = torch.device("cpu")
 model.to(device)
 
 # Load and preprocess the image
-image_path = r"..\docs\sims_face.jpg"
+image_path = r"..\docs\friends.jpg"
 if not os.path.exists(image_path):
     print(f"Error: Image not found at '{image_path}'")
 else:

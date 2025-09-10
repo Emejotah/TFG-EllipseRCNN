@@ -14,6 +14,7 @@ import numpy as np
 from typing import List, Callable, Dict, Any, Tuple
 from matplotlib.collections import EllipseCollection
 from matplotlib.axes import Axes
+from scipy.spatial.distance import cdist, euclidean
 
 # --- Configuration ---
 TTA_CONFIG = {
@@ -26,6 +27,52 @@ TTA_CONFIG = {
     'nms_iou_threshold': 0.5,  # IoU threshold for NMS
     'apply_nms': True,  # Whether to apply NMS to final predictions
 }
+
+# --- Quality-Aware Consensuation Configuration ---
+QUALITY_CONFIG = {
+    'high_quality_threshold': 0.8,     # Transforms for reference consensus
+    'min_inclusion_quality': 0.3,      # Minimum quality to be considered
+    'consistency_distance_base': 20.0,  # Base distance threshold (pixels)
+    'quality_exponent': 2.0,           # How much to emphasize quality in weighting
+    'fallback_to_single_best': True,   # Use best single prediction if consensus fails
+    'adaptive_threshold_multiplier': 2.0,  # Multiplier for adaptive thresholds
+}
+
+# --- Consensus Validation Configuration ---
+VALIDATION_CONFIG = {
+    'center_deviation_threshold': 7.0,    #  More lenient center tolerance
+    'angle_deviation_threshold': 15.0,     #  More lenient angle tolerance  
+    'area_deviation_threshold': 0.4,       #  Allow up to 40% area difference
+    'center_weight': 0.45,                 #  Less emphasis on center precision
+    'angle_weight': 0.45,                  #  Less emphasis on angle precision
+    'area_weight': 0.1,                    #  More tolerance for size variation
+}
+
+def update_tta_configs(tta_config=None, quality_config=None, validation_config=None):
+    """
+    Update TTA configuration parameters.
+    
+    Args:
+        tta_config: Dictionary with TTA_CONFIG updates
+        quality_config: Dictionary with QUALITY_CONFIG updates  
+        validation_config: Dictionary with VALIDATION_CONFIG updates
+    """
+    global TTA_CONFIG, QUALITY_CONFIG, VALIDATION_CONFIG
+    
+    if tta_config:
+        TTA_CONFIG.update(tta_config)
+    if quality_config:
+        QUALITY_CONFIG.update(quality_config)
+    if validation_config:
+        VALIDATION_CONFIG.update(validation_config)
+
+def get_current_configs():
+    """Get current configuration values."""
+    return {
+        'tta_config': TTA_CONFIG.copy(),
+        'quality_config': QUALITY_CONFIG.copy(),
+        'validation_config': VALIDATION_CONFIG.copy()
+    }
 
 # --- Forward Transformations ---
 
@@ -202,16 +249,6 @@ TTA_TRANSFORMS = [
     },
 ]
 
-# --- Quality-Aware Consensuation Configuration ---
-QUALITY_CONFIG = {
-    'high_quality_threshold': 0.8,     # Transforms for reference consensus
-    'min_inclusion_quality': 0.3,      # Minimum quality to be considered
-    'consistency_distance_base': 20.0,  # Base distance threshold (pixels)
-    'quality_exponent': 2.0,           # How much to emphasize quality in weighting
-    'fallback_to_single_best': True,   # Use best single prediction if consensus fails
-    'adaptive_threshold_multiplier': 2.0,  # Multiplier for adaptive thresholds
-}
-
 # --- Transform Quality Scoring ---
 
 def get_transform_quality(transform_name: str) -> float:
@@ -251,122 +288,100 @@ def get_transform_quality(transform_name: str) -> float:
     else:
         return 0.5  # Default medium quality
 
-# --- Original Simple Consensuation Function ---
+# --- Deviation Calculation Functions ---
 
-def consensuate_predictions_simple(predictions_list: List[Dict[str, torch.Tensor]], 
-                          min_score: float = None, 
-                          distance_threshold: float = None,
-                          size_similarity_threshold: float = 0.5) -> Dict[str, torch.Tensor]:
+def calculate_ellipse_deviation(ellipse1: torch.Tensor, ellipse2: torch.Tensor) -> Dict[str, float]:
     """
-    Simple consensuation of ellipse predictions from multiple TTA transformations.
+    Calculate deviation metrics between two ellipses.
     
     Args:
-        predictions_list: List of prediction dictionaries
-        min_score: Minimum confidence score threshold
-        distance_threshold: Maximum distance for grouping ellipses (pixels)
-        size_similarity_threshold: Maximum relative size difference for grouping (0-1)
+        ellipse1, ellipse2: Ellipse tensors [a, b, cx, cy, theta]
     
     Returns:
-        Consensuated prediction dictionary
+        Dictionary with deviation metrics
     """
-    if min_score is None:
-        min_score = TTA_CONFIG['min_score_threshold']
-    if distance_threshold is None:
-        distance_threshold = TTA_CONFIG['consensuation_distance_threshold']
+    # Center distance (pixels)
+    center1 = ellipse1[2:4]  # [cx, cy]
+    center2 = ellipse2[2:4]
+    center_distance = torch.norm(center2 - center1).item()
     
-    if not predictions_list:
-        return _empty_prediction_dict()
+    # Angle difference (degrees)
+    angle1 = ellipse1[4].item()
+    angle2 = ellipse2[4].item()
+    angle_diff = abs(angle2 - angle1)
+    # Handle angle wrapping
+    angle_diff = min(angle_diff, math.pi - angle_diff)
+    angle_diff_deg = math.degrees(angle_diff)
     
-    # Filter and collect valid predictions
-    valid_ellipses = []
-    valid_scores = []
-    valid_labels = []
-    valid_boxes = []
+    # Area difference (relative)
+    area1 = math.pi * ellipse1[0].item() * ellipse1[1].item()
+    area2 = math.pi * ellipse2[0].item() * ellipse2[1].item()
+    area_diff = abs(area2 - area1) / max(area1, 1e-6)
     
-    for pred_dict in predictions_list:
-        if pred_dict["ellipse_params"].numel() == 0:
-            continue
-            
-        score_mask = pred_dict["scores"] > min_score
-        if score_mask.any():
-            valid_ellipses.append(pred_dict["ellipse_params"][score_mask])
-            valid_scores.append(pred_dict["scores"][score_mask])
-            valid_labels.append(pred_dict["labels"][score_mask])
-            valid_boxes.append(pred_dict["boxes"][score_mask])
+    return {
+        'center_distance': center_distance,
+        'angle_difference': angle_diff_deg,
+        'area_difference': area_diff
+    }
+
+def calculate_weighted_deviation_score(deviation: Dict[str, float]) -> float:
+    """
+    Calculate weighted deviation score from individual metrics.
     
-    if not valid_ellipses:
-        return _empty_prediction_dict()
+    Args:
+        deviation: Dictionary with center_distance, angle_difference, area_difference
     
-    # Concatenate all predictions
-    all_ellipses = torch.cat(valid_ellipses, dim=0)
-    all_scores = torch.cat(valid_scores, dim=0)
-    all_labels = torch.cat(valid_labels, dim=0)
-    all_boxes = torch.cat(valid_boxes, dim=0)
+    Returns:
+        Weighted deviation score (0 = identical, higher = more different)
+    """
+    center_norm = deviation['center_distance'] / VALIDATION_CONFIG['center_deviation_threshold']
+    angle_norm = deviation['angle_difference'] / VALIDATION_CONFIG['angle_deviation_threshold']
+    area_norm = deviation['area_difference'] / VALIDATION_CONFIG['area_deviation_threshold']
     
-    # Group nearby and similar ellipses
-    consensuated_ellipses = []
-    consensuated_scores = []
-    consensuated_labels = []
-    consensuated_boxes = []
+    weighted_score = (
+        VALIDATION_CONFIG['center_weight'] * center_norm +
+        VALIDATION_CONFIG['angle_weight'] * angle_norm +
+        VALIDATION_CONFIG['area_weight'] * area_norm
+    )
     
-    used_indices = set()
+    return weighted_score
+
+def is_ellipse_consensus_valid(individual_ellipses: List[torch.Tensor], 
+                             consensus_ellipse: torch.Tensor) -> bool:
+    """
+    Validate if consensus ellipse is acceptable based on individual deviations.
     
-    for i in range(len(all_ellipses)):
-        if i in used_indices:
-            continue
-            
-        # Find ellipses close to current one
-        current_center = all_ellipses[i, 2:4]  # cx, cy
-        current_size = all_ellipses[i, 0:2]    # a, b
-        group_indices = [i]
+    Args:
+        individual_ellipses: List of individual ellipse predictions
+        consensus_ellipse: Consensuated ellipse
+    
+    Returns:
+        True if consensus is valid, False if it should be rejected
+    """
+    if not individual_ellipses:
+        return False
+    
+    total_deviation = 0.0
+    valid_predictions = 0
+    
+    for ellipse in individual_ellipses:
+        deviation = calculate_ellipse_deviation(ellipse, consensus_ellipse)
         
-        for j in range(i + 1, len(all_ellipses)):
-            if j in used_indices:
-                continue
-                
-            other_center = all_ellipses[j, 2:4]
-            other_size = all_ellipses[j, 0:2]
+        # Check individual thresholds
+        if (deviation['center_distance'] <= VALIDATION_CONFIG['center_deviation_threshold'] and
+            deviation['angle_difference'] <= VALIDATION_CONFIG['angle_deviation_threshold'] and
+            deviation['area_difference'] <= VALIDATION_CONFIG['area_deviation_threshold']):
             
-            # Check center distance
-            center_distance = torch.norm(current_center - other_center).item()
-            
-            # Check size similarity (relative difference)
-            size_ratio = torch.min(current_size / (other_size + 1e-8))  # Avoid division by zero
-            size_similarity = size_ratio.item()
-            
-            # Group if both center distance and size similarity are within thresholds
-            if (center_distance < distance_threshold and 
-                size_similarity > size_similarity_threshold):
-                group_indices.append(j)
-        
-        used_indices.update(group_indices)
-        
-        # Consensuate the group with score weighting
-        group_ellipses = all_ellipses[group_indices]
-        group_scores = all_scores[group_indices]
-        group_labels = all_labels[group_indices]
-        group_boxes = all_boxes[group_indices]
-        
-        # Calculate consensuated parameters with score weighting
-        consensuated_ellipse = _consensuate_ellipse_group_weighted(group_ellipses, group_scores)
-        consensuated_score = torch.mean(group_scores)
-        consensuated_label = torch.mode(group_labels).values
-        consensuated_box = torch.mean(group_boxes, dim=0)
-        
-        consensuated_ellipses.append(consensuated_ellipse)
-        consensuated_scores.append(consensuated_score)
-        consensuated_labels.append(consensuated_label)
-        consensuated_boxes.append(consensuated_box)
+            weighted_score = calculate_weighted_deviation_score(deviation)
+            total_deviation += weighted_score
+            valid_predictions += 1
     
-    if consensuated_ellipses:
-        return {
-            'boxes': torch.stack(consensuated_boxes),
-            'ellipse_params': torch.stack(consensuated_ellipses),
-            'labels': torch.stack(consensuated_labels),
-            'scores': torch.stack(consensuated_scores),
-        }
-    else:
-        return _empty_prediction_dict()
+    # Require at least 3 predictions within thresholds for valid consensus
+    if valid_predictions >= 3:
+        avg_deviation = total_deviation / valid_predictions
+        return avg_deviation <= 1.0  # Normalized threshold
+    
+    return False
 
 # --- Quality-Aware Consensuation Functions ---
 
@@ -471,8 +486,7 @@ def consensuate_predictions(predictions_list: List[Dict[str, torch.Tensor]],
         # Fallback: use best available predictions
         print("🔄 No high-quality transforms available, using best available predictions")
         scored_predictions.sort(key=lambda x: x['transform_quality'] * x['confidence'], reverse=True)
-        top_predictions = scored_predictions[:min(3, len(scored_predictions))]  # Use top 3
-        reference_consensus = _establish_reference_consensus(top_predictions, distance_threshold)
+        reference_consensus = _establish_reference_consensus(scored_predictions, distance_threshold)
     
     if not reference_consensus:
         # Ultimate fallback: return single best prediction
@@ -594,6 +608,11 @@ def _generate_final_consensus(consensus_groups: List[List[Dict]]) -> Dict[str, t
         # Quality-weighted consensus ellipse
         consensus_ellipse = _weighted_ellipse_consensus_quality(ellipses, combined_weights)
         
+        # Validate consensus based on individual deviations
+        individual_ellipses = [p['ellipse'] for p in group]
+        if not is_ellipse_consensus_valid(individual_ellipses, consensus_ellipse):
+            continue  # Skip this consensus group if validation fails
+        
         # Consensus score (weighted average)
         consensus_score = torch.sum(confidences * combined_weights)
         
@@ -620,9 +639,57 @@ def _generate_final_consensus(consensus_groups: List[List[Dict]]) -> Dict[str, t
     else:
         return _empty_prediction_dict(device)
 
+def _weighted_l1_median(X: np.ndarray, WX: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """
+    Computes weighted geometric median (L1-median)
+    :param X: the list of sample points, a 2D ndarray
+    :param WX: the list of weights  
+    :param eps: acceptable error margin
+    :return: first estimate meeting eps
+    """
+    y = np.average(X, axis=0, weights=WX)
+    while True:
+        while np.any(cdist(X, [y]) == 0):
+            y += 0.1 * np.ones(len(y))
+        W = np.expand_dims(WX, axis=1) / cdist(X, [y])  # element-wise operation
+        y1 = np.sum(W * X, 0) / np.sum(W)
+        if euclidean(y, y1) < eps:
+            return y1
+        y = y1
+
+def _weighted_median(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    """
+    Compute weighted median of tensor values.
+    
+    Args:
+        values: Tensor of values to find median of
+        weights: Tensor of weights corresponding to values
+        
+    Returns:
+        Weighted median value
+    """
+    # Sort values and corresponding weights
+    sorted_indices = torch.argsort(values)
+    sorted_values = values[sorted_indices]
+    sorted_weights = weights[sorted_indices]
+    
+    # Calculate cumulative weights
+    cumulative_weights = torch.cumsum(sorted_weights, dim=0)
+    total_weight = torch.sum(weights)
+    
+    # Find the median position
+    median_weight = total_weight / 2.0
+    
+    # Find the index where cumulative weight exceeds median_weight
+    median_idx = torch.searchsorted(cumulative_weights, median_weight, right=True)
+    median_idx = torch.clamp(median_idx, 0, len(sorted_values) - 1)
+    
+    return sorted_values[median_idx]
+
 def _weighted_ellipse_consensus_quality(ellipses: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     """
-    Compute quality-weighted consensus of ellipse parameters.
+    Compute quality-weighted consensus of ellipse parameters using weighted-l1-median for centers
+    and weighted median/mean for other parameters.
     
     Args:
         ellipses: Tensor of shape (N, 5) containing [a, b, cx, cy, theta]
@@ -636,15 +703,18 @@ def _weighted_ellipse_consensus_quality(ellipses: torch.Tensor, weights: torch.T
     
     device = ellipses.device
     
-    # Semi-axes: weighted mean
-    a_consensus = torch.sum(ellipses[:, 0] * weights)
-    b_consensus = torch.sum(ellipses[:, 1] * weights)
+    # Semi-axes: weighted median for robustness
+    a_consensus = _weighted_median(ellipses[:, 0], weights)
+    b_consensus = _weighted_median(ellipses[:, 1], weights)
     
-    # Centers: weighted mean
-    cx_consensus = torch.sum(ellipses[:, 2] * weights)
-    cy_consensus = torch.sum(ellipses[:, 3] * weights)
+    # Centers: weighted L1-median for robustness against outliers
+    centers = ellipses[:, 2:4].cpu().numpy()  # Convert to numpy for L1-median computation
+    weights_np = weights.cpu().numpy()
+    center_consensus = _weighted_l1_median(centers, weights_np)
+    cx_consensus = torch.tensor(center_consensus[0], device=device)
+    cy_consensus = torch.tensor(center_consensus[1], device=device)
     
-    # Angles: weighted circular mean
+    # Angles: weighted circular mean (this is already robust for angles)
     angles = ellipses[:, 4]
     cos_angles = torch.cos(angles)
     sin_angles = torch.sin(angles)
@@ -663,166 +733,6 @@ def _single_prediction_to_dict(pred: Dict) -> Dict[str, torch.Tensor]:
         'labels': pred['label'].unsqueeze(0),
         'scores': torch.tensor([pred['confidence']]),
     }
-    """
-    Consensuate ellipse predictions from multiple TTA transformations.
-    
-    Args:
-        predictions_list: List of prediction dictionaries
-        min_score: Minimum confidence score threshold
-        distance_threshold: Maximum distance for grouping ellipses (pixels)
-        size_similarity_threshold: Maximum relative size difference for grouping (0-1)
-    
-    Returns:
-        Consensuated prediction dictionary
-    """
-    if min_score is None:
-        min_score = TTA_CONFIG['min_score_threshold']
-    if distance_threshold is None:
-        distance_threshold = TTA_CONFIG['consensuation_distance_threshold']
-    
-    if not predictions_list:
-        return _empty_prediction_dict()
-    
-    # Filter and collect valid predictions
-    valid_ellipses = []
-    valid_scores = []
-    valid_labels = []
-    valid_boxes = []
-    
-    for pred_dict in predictions_list:
-        if pred_dict["ellipse_params"].numel() == 0:
-            continue
-            
-        score_mask = pred_dict["scores"] > min_score
-        if score_mask.any():
-            valid_ellipses.append(pred_dict["ellipse_params"][score_mask])
-            valid_scores.append(pred_dict["scores"][score_mask])
-            valid_labels.append(pred_dict["labels"][score_mask])
-            valid_boxes.append(pred_dict["boxes"][score_mask])
-    
-    if not valid_ellipses:
-        return _empty_prediction_dict()
-    
-    # Concatenate all predictions
-    all_ellipses = torch.cat(valid_ellipses, dim=0)
-    all_scores = torch.cat(valid_scores, dim=0)
-    all_labels = torch.cat(valid_labels, dim=0)
-    all_boxes = torch.cat(valid_boxes, dim=0)
-    
-    # Group nearby and similar ellipses
-    consensuated_ellipses = []
-    consensuated_scores = []
-    consensuated_labels = []
-    consensuated_boxes = []
-    
-    used_indices = set()
-    
-    for i in range(len(all_ellipses)):
-        if i in used_indices:
-            continue
-            
-        # Find ellipses close to current one
-        current_center = all_ellipses[i, 2:4]  # cx, cy
-        current_size = all_ellipses[i, 0:2]    # a, b
-        group_indices = [i]
-        
-        for j in range(i + 1, len(all_ellipses)):
-            if j in used_indices:
-                continue
-                
-            other_center = all_ellipses[j, 2:4]
-            other_size = all_ellipses[j, 0:2]
-            
-            # Check center distance
-            center_distance = torch.norm(current_center - other_center).item()
-            
-            # Check size similarity (relative difference)
-            size_ratio = torch.min(current_size / (other_size + 1e-8))  # Avoid division by zero
-            size_similarity = size_ratio.item()
-            
-            # Group if both center distance and size similarity are within thresholds
-            if (center_distance < distance_threshold and 
-                size_similarity > size_similarity_threshold):
-                group_indices.append(j)
-        
-        used_indices.update(group_indices)
-        
-        # Consensuate the group with score weighting
-        group_ellipses = all_ellipses[group_indices]
-        group_scores = all_scores[group_indices]
-        group_labels = all_labels[group_indices]
-        group_boxes = all_boxes[group_indices]
-        
-        # Calculate consensuated parameters with score weighting
-        consensuated_ellipse = _consensuate_ellipse_group_weighted(group_ellipses, group_scores)
-        consensuated_score = torch.mean(group_scores)
-        consensuated_label = torch.mode(group_labels).values
-        consensuated_box = torch.mean(group_boxes, dim=0)
-        
-        consensuated_ellipses.append(consensuated_ellipse)
-        consensuated_scores.append(consensuated_score)
-        consensuated_labels.append(consensuated_label)
-        consensuated_boxes.append(consensuated_box)
-    
-    if consensuated_ellipses:
-        return {
-            'boxes': torch.stack(consensuated_boxes),
-            'ellipse_params': torch.stack(consensuated_ellipses),
-            'labels': torch.stack(consensuated_labels),
-            'scores': torch.stack(consensuated_scores),
-        }
-    else:
-        return _empty_prediction_dict()
-
-def _consensuate_ellipse_group(ellipses: torch.Tensor) -> torch.Tensor:
-    """Consensuate a group of ellipses using appropriate statistics."""
-    # Semi-axes: mean
-    a_consensuated = torch.mean(ellipses[:, 0])
-    b_consensuated = torch.mean(ellipses[:, 1])
-    
-    # Centers: median (robust to outliers)
-    cx_consensuated = torch.median(ellipses[:, 2])
-    cy_consensuated = torch.median(ellipses[:, 3])
-    
-    # Angles: circular mean (handle both real and complex operations properly)
-    angles = ellipses[:, 4]
-    if len(angles) == 1:
-        theta_consensuated = angles[0]
-    else:
-        # Use real tensors for cos and sin, then combine for circular mean
-        cos_angles = torch.cos(angles)
-        sin_angles = torch.sin(angles)
-        mean_cos = torch.mean(cos_angles)
-        mean_sin = torch.mean(sin_angles)
-        theta_consensuated = torch.atan2(mean_sin, mean_cos)
-    
-    return torch.tensor([a_consensuated, b_consensuated, cx_consensuated, cy_consensuated, theta_consensuated])
-
-def _consensuate_ellipse_group_weighted(ellipses: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
-    """Consensuate a group of ellipses using score-weighted statistics."""
-    if len(ellipses) == 1:
-        return ellipses[0]
-    
-    # Normalize weights
-    weights = scores / torch.sum(scores)
-    
-    # Semi-axes: weighted mean
-    a_consensuated = torch.sum(ellipses[:, 0] * weights)
-    b_consensuated = torch.sum(ellipses[:, 1] * weights)
-    
-    # Centers: weighted mean (more reliable than median with weights)
-    cx_consensuated = torch.sum(ellipses[:, 2] * weights)
-    cy_consensuated = torch.sum(ellipses[:, 3] * weights)
-    
-    # Angles: weighted circular mean
-    angles = ellipses[:, 4]
-    cos_angles = torch.cos(angles)
-    sin_angles = torch.sin(angles)
-    weighted_cos = torch.sum(cos_angles * weights)
-    weighted_sin = torch.sum(sin_angles * weights)
-    theta_consensuated = torch.atan2(weighted_sin, weighted_cos)
-    
-    return torch.tensor([a_consensuated, b_consensuated, cx_consensuated, cy_consensuated, theta_consensuated])
 
 def apply_nms_to_predictions(pred_dict: Dict[str, torch.Tensor], 
                            iou_threshold: float = None) -> Dict[str, torch.Tensor]:
@@ -874,7 +784,7 @@ def _empty_prediction_dict(device: torch.device = None) -> Dict[str, torch.Tenso
 
 def tta_predict(model: Any, image_tensor: torch.Tensor, device: torch.device, 
                 min_score: float = None, consensuate: bool = True, 
-                visualize: bool = False, consensuation_method: str = 'quality',
+                visualize: bool = False,
                 apply_nms: bool = True, nms_iou_threshold: float = None) -> List[Dict[str, torch.Tensor]]:
     """
     Perform Test Time Augmentation prediction on an image.
@@ -886,7 +796,6 @@ def tta_predict(model: Any, image_tensor: torch.Tensor, device: torch.device,
         min_score: Minimum confidence threshold
         consensuate: Whether to consensuate predictions
         visualize: Whether to show visualization
-        consensuation_method: 'simple' or 'quality' for consensuation method
         apply_nms: Whether to apply Non-Maximum Suppression (default from config)
         nms_iou_threshold: IoU threshold for NMS (default from config)
     
@@ -949,10 +858,7 @@ def tta_predict(model: Any, image_tensor: torch.Tensor, device: torch.device,
     
     # Consensuate predictions if requested
     if consensuate and all_predictions:
-        if consensuation_method == 'quality':
-            final_predictions = consensuate_predictions(all_predictions, all_transform_names, min_score)
-        else:  # 'simple'
-            final_predictions = consensuate_predictions_simple(all_predictions, min_score)
+        final_predictions = consensuate_predictions(all_predictions, all_transform_names, min_score)
     elif all_predictions:
         # Concatenate all predictions without consensuation
         final_predictions = {
@@ -967,10 +873,6 @@ def tta_predict(model: Any, image_tensor: torch.Tensor, device: torch.device,
     # Apply NMS if requested and we have predictions
     if apply_nms and final_predictions['boxes'].numel() > 0:
         final_predictions = apply_nms_to_predictions(final_predictions, nms_iou_threshold)
-    
-    # Apply Non-Maximum Suppression to reduce duplicates
-    if TTA_CONFIG['apply_nms'] and final_predictions['ellipse_params'].numel() > 0:
-        final_predictions = apply_nms_to_predictions(final_predictions)
     
     # Finalize visualization
     if visualize and legend_elements:
@@ -990,7 +892,7 @@ def tta_predict(model: Any, image_tensor: torch.Tensor, device: torch.device,
                 _plot_ellipses(final_predictions["ellipse_params"][score_mask], 
                              ax_consensus, 'white')
             
-            ax_consensus.set_title(f"Consensuated Predictions ({consensuation_method.capitalize()} Method) - White", fontsize=14)
+            ax_consensus.set_title("Consensuated Predictions (Quality-Aware Method) - White", fontsize=14)
             plt.show(block=False)
     
     return [final_predictions]

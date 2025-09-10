@@ -38,6 +38,16 @@ QUALITY_CONFIG = {
     'adaptive_threshold_multiplier': 2.0,  # Multiplier for adaptive thresholds
 }
 
+# --- Consensus Validation Configuration ---
+VALIDATION_CONFIG = {
+    'center_deviation_threshold': 5.0,    # Max center distance in pixels
+    'angle_deviation_threshold': 7.0,     # Max angle difference in degrees
+    'area_deviation_threshold': 0.2,       # Max relative area difference (%)
+    'center_weight': 0.4,                  # Weight for center deviation
+    'angle_weight': 0.4,                   # Weight for angle deviation
+    'area_weight': 0.2,                    # Weight for area deviation
+}
+
 # --- Forward Transformations ---
 
 def identity_transform(image: torch.Tensor) -> torch.Tensor:
@@ -364,6 +374,101 @@ def get_transform_quality(transform_name: str) -> float:
     else:
         return 0.5  # Neutral quality for unknown transforms
 
+# --- Deviation Calculation Functions ---
+
+def calculate_ellipse_deviation(ellipse1: torch.Tensor, ellipse2: torch.Tensor) -> Dict[str, float]:
+    """
+    Calculate deviation metrics between two ellipses.
+    
+    Args:
+        ellipse1, ellipse2: Ellipse tensors [a, b, cx, cy, theta]
+    
+    Returns:
+        Dictionary with deviation metrics
+    """
+    # Center distance (pixels)
+    center1 = ellipse1[2:4]  # [cx, cy]
+    center2 = ellipse2[2:4]
+    center_distance = torch.norm(center2 - center1).item()
+    
+    # Angle difference (degrees)
+    angle1 = ellipse1[4].item()
+    angle2 = ellipse2[4].item()
+    angle_diff = abs(angle2 - angle1)
+    # Handle angle wrapping
+    angle_diff = min(angle_diff, math.pi - angle_diff)
+    angle_diff_deg = math.degrees(angle_diff)
+    
+    # Area difference (relative)
+    area1 = math.pi * ellipse1[0].item() * ellipse1[1].item()
+    area2 = math.pi * ellipse2[0].item() * ellipse2[1].item()
+    area_diff = abs(area2 - area1) / max(area1, 1e-6)
+    
+    return {
+        'center_distance': center_distance,
+        'angle_difference': angle_diff_deg,
+        'area_difference': area_diff
+    }
+
+def calculate_weighted_deviation_score(deviation: Dict[str, float]) -> float:
+    """
+    Calculate weighted deviation score from individual metrics.
+    
+    Args:
+        deviation: Dictionary with center_distance, angle_difference, area_difference
+    
+    Returns:
+        Weighted deviation score (0 = identical, higher = more different)
+    """
+    center_norm = deviation['center_distance'] / VALIDATION_CONFIG['center_deviation_threshold']
+    angle_norm = deviation['angle_difference'] / VALIDATION_CONFIG['angle_deviation_threshold']
+    area_norm = deviation['area_difference'] / VALIDATION_CONFIG['area_deviation_threshold']
+    
+    weighted_score = (
+        VALIDATION_CONFIG['center_weight'] * center_norm +
+        VALIDATION_CONFIG['angle_weight'] * angle_norm +
+        VALIDATION_CONFIG['area_weight'] * area_norm
+    )
+    
+    return weighted_score
+
+def is_ellipse_consensus_valid(individual_ellipses: List[torch.Tensor], 
+                             consensus_ellipse: torch.Tensor) -> bool:
+    """
+    Validate if consensus ellipse is acceptable based on individual deviations.
+    
+    Args:
+        individual_ellipses: List of individual ellipse predictions
+        consensus_ellipse: Consensuated ellipse
+    
+    Returns:
+        True if consensus is valid, False if it should be rejected
+    """
+    if not individual_ellipses:
+        return False
+    
+    total_deviation = 0.0
+    valid_predictions = 0
+    
+    for ellipse in individual_ellipses:
+        deviation = calculate_ellipse_deviation(ellipse, consensus_ellipse)
+        
+        # Check individual thresholds
+        if (deviation['center_distance'] <= VALIDATION_CONFIG['center_deviation_threshold'] and
+            deviation['angle_difference'] <= VALIDATION_CONFIG['angle_deviation_threshold'] and
+            deviation['area_difference'] <= VALIDATION_CONFIG['area_deviation_threshold']):
+            
+            weighted_score = calculate_weighted_deviation_score(deviation)
+            total_deviation += weighted_score
+            valid_predictions += 1
+    
+    # Require at least 2 predictions within thresholds for valid consensus
+    if valid_predictions >= 2:
+        avg_deviation = total_deviation / valid_predictions
+        return avg_deviation <= 1.0  # Normalized threshold
+    
+    return False
+
 # --- Quality-Aware Consensuation Functions ---
 
 def consensuate_predictions(predictions_list: List[Dict[str, torch.Tensor]], 
@@ -597,6 +702,11 @@ def _generate_final_consensus(consensus_groups: List[List[Dict]]) -> Dict[str, t
         # Quality-weighted consensus ellipse
         consensus_ellipse = _weighted_ellipse_consensus(ellipses, combined_weights)
         
+        # Validate consensus based on individual deviations
+        individual_ellipses = [p['ellipse'] for p in group]
+        if not is_ellipse_consensus_valid(individual_ellipses, consensus_ellipse):
+            continue  # Skip this consensus group if validation fails
+        
         # Consensus score (weighted average)
         consensus_score = torch.sum(confidences * combined_weights)
         
@@ -796,18 +906,17 @@ def tta_predict_with_details(model: Any, image_tensor: torch.Tensor, device: tor
         per_transform_details.append(transform_details)
     
     # Return results based on mode
-    # COMMENTED OUT: Consensuation for individual transform testing
-    # if consensuate and all_predictions:
-    #     # Consensuated mode: return one combined prediction
-    #     try:
-    #         final_predictions = consensuate_predictions(all_predictions, all_transform_names, min_score)
-    #     except Exception as consensus_error:
-    #         print(f"⚠️ Consensuation failed: {consensus_error}")
-    #         print(f"   Falling back to original prediction")
-    #         # Fall back to first prediction if consensuation fails
-    #         final_predictions = all_predictions[0] if all_predictions else _empty_prediction_dict(device)
-    #     return [final_predictions], per_transform_details
-    if all_predictions:
+    if consensuate and all_predictions:
+        # Consensuated mode: return one combined prediction with validation
+        try:
+            final_predictions = consensuate_predictions(all_predictions, all_transform_names, min_score)
+        except Exception as consensus_error:
+            print(f"⚠️ Consensuation failed: {consensus_error}")
+            print(f"   Falling back to original prediction")
+            # Fall back to first prediction if consensuation fails
+            final_predictions = all_predictions[0] if all_predictions else _empty_prediction_dict(device)
+        return [final_predictions], per_transform_details
+    elif all_predictions:
         # Individual mode: return all individual predictions separately
         return all_predictions, per_transform_details
     else:
@@ -883,12 +992,11 @@ def tta_predict(model: Any, image_tensor: torch.Tensor, device: torch.device,
                                                 lw=4, label=transform_config['name']))
     
     # Return results based on mode  
-    # COMMENTED OUT: Consensuation for individual transform testing
-    # if consensuate and all_predictions:
-    #     # Consensuated mode: return one combined prediction
-    #     final_predictions = consensuate_predictions(all_predictions, all_transform_names, min_score)
-    #     return [final_predictions]
-    if all_predictions:
+    if consensuate and all_predictions:
+        # Consensuated mode: return one combined prediction with validation
+        final_predictions = consensuate_predictions(all_predictions, all_transform_names, min_score)
+        return [final_predictions]
+    elif all_predictions:
         # Individual mode: return all individual predictions
         return all_predictions
     else:
