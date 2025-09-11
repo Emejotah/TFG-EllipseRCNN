@@ -195,8 +195,9 @@ tmp/
 .temp/
 .tmp/
 
-# Documentation images (exclude PNG files from docs folder)
-docs/*.png
+# Documentation images (include PNG files from docs folder)
+!docs/*.png
+!docs/*.jpg
 
 *.ipynb
 *.m
