@@ -49,7 +49,7 @@ from ellipse_rcnn.utils.viz import plot_single_pred
 model = EllipseRCNN.from_pretrained("MJGT/ellipse-rcnn-FDDB")  # For the FDDB face detection model
 model.eval()
 
-png = Image.open("docs/friends.png").convert("L")
+png = Image.open("docs/friends.jpg").convert("L")
 img = to_tensor(png)
 with torch.no_grad():
     pred = model([img])
